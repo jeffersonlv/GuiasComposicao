@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -14,6 +15,8 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
+import android.text.TextUtils
+import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -36,6 +39,8 @@ class OverlayService : Service() {
 
     private lateinit var wm: WindowManager
     private var guidesView: GuidesView? = null
+    private var guidesParams: WindowManager.LayoutParams? = null
+    private var guidesHidden = false
     private var panel: View? = null
     private lateinit var panelParams: WindowManager.LayoutParams
     private val prefs by lazy { getSharedPreferences("overlay", MODE_PRIVATE) }
@@ -71,25 +76,63 @@ class OverlayService : Service() {
             orientation = prefs.getInt("orientation", 0)
             quarterTurns = prefs.getInt("turns", 0)
         }
+        // Tamanho FIXO = tela física inteira. Antes era MATCH_PARENT, e o Android
+        // redimensionava a janela quando a barra de status/navegação aparecia ou
+        // sumia — isso deslocava as linhas alguns pixels.
+        val (sw, sh) = fullScreenSize()
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            sw, sh,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
             // IMPORTANTE: a partir do Android 12, um overlay só deixa o toque
             // passar para o app de baixo se a opacidade da janela for <= 0.8.
             alpha = 0.8f
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // Não se ajustar às barras do sistema (status/navegação/teclado).
+                fitInsetsTypes = 0
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
         wm.addView(view, params)
         guidesView = view
+        guidesParams = params
+    }
+
+    /** Tamanho físico real da tela, incluindo as áreas das barras do sistema. */
+    private fun fullScreenSize(): Pair<Int, Int> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = wm.maximumWindowMetrics.bounds
+            b.width() to b.height()
+        } else {
+            val m = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(m)
+            m.widthPixels to m.heightPixels
+        }
+
+    /** Ao girar o celular, a tela troca largura/altura: reajusta a camada de guias. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val view = guidesView ?: return
+        val params = guidesParams ?: return
+        val (sw, sh) = fullScreenSize()
+        if (params.width != sw || params.height != sh) {
+            params.width = sw
+            params.height = sh
+            runCatching { wm.updateViewLayout(view, params) }
+        }
     }
 
     // ---------- Camada 2: controles (arrastáveis) ----------
@@ -110,7 +153,12 @@ class OverlayService : Service() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val handle = chip("⠿").apply { setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f) }
-        val selector = chip("${savedGuide().label}  ▾")
+        val selector = chip("${savedGuide().label}  ▾").apply {
+            // Nomes longos ("Triângulos harmoniosos") não podem empurrar o ✕ para fora da tela
+            maxWidth = dp(170)
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+        }
         // Espelha/gira o guia (útil para espirais e triângulos)
         val flip = chip("⇄").apply {
             setOnClickListener {
@@ -129,8 +177,25 @@ class OverlayService : Service() {
                 }
             }
         }
-        val close = chip("✕")
-        bar.addView(handle); bar.addView(selector); bar.addView(flip); bar.addView(rotate); bar.addView(close)
+        // Oculta/mostra as linhas para ver a foto limpa
+        val eye = chip("👁").apply {
+            setOnClickListener {
+                guidesHidden = !guidesHidden
+                guidesView?.visibility = if (guidesHidden) View.INVISIBLE else View.VISIBLE
+                alpha = if (guidesHidden) 0.4f else 1f
+            }
+        }
+        val close = chip("✕").apply { setOnClickListener { stopSelf() } }
+
+        // Linha 1: alça, seletor e fechar (sempre visível)
+        bar.addView(handle); bar.addView(selector); bar.addView(close)
+
+        // Linha 2: ferramentas
+        val tools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        tools.addView(flip); tools.addView(rotate); tools.addView(eye)
 
         // "Dropdown": lista que abre dentro da própria janela.
         // (Spinner nativo não funciona bem em janela de overlay.)
@@ -160,9 +225,9 @@ class OverlayService : Service() {
             optionsScroll.visibility =
                 if (optionsScroll.visibility == View.GONE) View.VISIBLE else View.GONE
         }
-        close.setOnClickListener { stopSelf() }
 
         root.addView(bar)
+        root.addView(tools)
         root.addView(optionsScroll)
 
         panelParams = WindowManager.LayoutParams(
