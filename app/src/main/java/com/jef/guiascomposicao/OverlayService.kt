@@ -21,6 +21,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.roundToInt
 
@@ -65,7 +66,11 @@ class OverlayService : Service() {
     // ---------- Camada 1: guias (não recebe toque) ----------
 
     private fun addGuidesLayer() {
-        val view = GuidesView(this).apply { guide = savedGuide() }
+        val view = GuidesView(this).apply {
+            guide = savedGuide()
+            orientation = prefs.getInt("orientation", 0)
+            quarterTurns = prefs.getInt("turns", 0)
+        }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -106,14 +111,39 @@ class OverlayService : Service() {
         }
         val handle = chip("⠿").apply { setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f) }
         val selector = chip("${savedGuide().label}  ▾")
+        // Espelha/gira o guia (útil para espirais e triângulos)
+        val flip = chip("⇄").apply {
+            setOnClickListener {
+                guidesView?.let { g ->
+                    g.orientation = g.orientation + 1
+                    prefs.edit().putInt("orientation", g.orientation).apply()
+                }
+            }
+        }
+        // Gira o guia de 90 em 90 graus
+        val rotate = chip("⟳").apply {
+            setOnClickListener {
+                guidesView?.let { g ->
+                    g.quarterTurns = g.quarterTurns + 1
+                    prefs.edit().putInt("turns", g.quarterTurns).apply()
+                }
+            }
+        }
         val close = chip("✕")
-        bar.addView(handle); bar.addView(selector); bar.addView(close)
+        bar.addView(handle); bar.addView(selector); bar.addView(flip); bar.addView(rotate); bar.addView(close)
 
         // "Dropdown": lista que abre dentro da própria janela.
         // (Spinner nativo não funciona bem em janela de overlay.)
         val options = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+        }
+        // Lista com rolagem: são 16 guias, não cabem todos na tela de uma vez.
+        val optionsScroll = ScrollView(this).apply {
             visibility = View.GONE
+            addView(options)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(320)
+            )
         }
         GuideType.entries.forEach { type ->
             options.addView(chip(type.label).apply {
@@ -121,18 +151,19 @@ class OverlayService : Service() {
                     guidesView?.guide = type
                     prefs.edit().putString("guide", type.name).apply()
                     selector.text = "${type.label}  ▾"
-                    options.visibility = View.GONE
+                    optionsScroll.visibility = View.GONE
                 }
             })
         }
 
         selector.setOnClickListener {
-            options.visibility = if (options.visibility == View.GONE) View.VISIBLE else View.GONE
+            optionsScroll.visibility =
+                if (optionsScroll.visibility == View.GONE) View.VISIBLE else View.GONE
         }
         close.setOnClickListener { stopSelf() }
 
         root.addView(bar)
-        root.addView(options)
+        root.addView(optionsScroll)
 
         panelParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
